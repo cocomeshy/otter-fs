@@ -1,7 +1,7 @@
 rune 1
 name "fs"
 version "1.0.0"
-description "Filesystem operations via raw syscalls"
+description "Filesystem access over raw syscalls (read, write, stat, mkdir)"
 author "cocomeshy"
 license "MIT"
 entry fs.otter
