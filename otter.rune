@@ -1,0 +1,18 @@
+rune 1
+name "fs"
+version "1.0.0"
+description "Filesystem operations via raw syscalls"
+author "cocomeshy"
+license "MIT"
+entry fs.otter
+
+export open
+export read
+export write
+export close
+export seek
+export delete
+export mkdir
+export exists
+export read_file
+export write_file

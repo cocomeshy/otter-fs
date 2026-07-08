@@ -1,0 +1,207 @@
+use memory;
+
+// ── Windows file API ──
+link "kernel32.dll" ~> CreateFileA(
+  lpFileName:str, dwDesiredAccess:int, dwShareMode:int,
+  lpSecurityAttributes:rawptr, dwCreationDisposition:int,
+  dwFlagsAndAttributes:int, hTemplateFile:rawptr
+) -> rawptr;
+// Windows ReadFile ("kernel32.dll"): read bytes from a file/handle (Windows)
+link "kernel32.dll" ~> ReadFile(
+  hFile:rawptr, lpBuffer:rawptr, nToRead:int,
+  lpNumberOfBytesRead:rawptr, lpOverlapped:rawptr
+) -> int;
+// Windows WriteFile ("kernel32.dll"): write bytes to a file/handle (Windows)
+link "kernel32.dll" ~> WriteFile(
+  hFile:rawptr, lpBuffer:str, nToWrite:int,
+  lpNumberOfBytesWritten:rawptr, lpOverlapped:rawptr
+) -> int;
+// Windows CloseHandle ("kernel32.dll"): close a kernel handle (Windows)
+link "kernel32.dll" ~> CloseHandle(hObject:rawptr) -> int;
+// Windows GetFileSizeEx ("kernel32.dll"): size of an open file, 64-bit (Windows)
+link "kernel32.dll" ~> GetFileSizeEx(hFile:rawptr, lpFileSize:rawptr) -> int;
+// Windows DeleteFileA ("kernel32.dll"): delete a file by path (Windows)
+link "kernel32.dll" ~> DeleteFileA(lpFileName:str) -> int;
+// Windows CreateDirectoryA ("kernel32.dll"): create a directory (Windows)
+link "kernel32.dll" ~> CreateDirectoryA(lpPathName:str, lpSec:rawptr) -> int;
+
+// ── Linux syscalls (canonical x86_64 numbers; the compiler remaps
+//    same-signature calls to arm64. open/unlink/mkdir change ABI on arm64
+//    (they become the *at variants with an AT_FDCWD dirfd), so those are
+//    dispatched per-ARCH below rather than remapped. ──
+link 2  ~> __linux_open(path:str, flags:int, mode:int) -> int;
+// Linux openat (syscall 56): open a file relative to a directory fd (arm64 open)
+link 56 ~> __linux_openat(dirfd:int, path:str, flags:int, mode:int) -> int;
+// Linux read (syscall 0): read bytes from a file descriptor into a buffer
+link 0  ~> __linux_read(fd:int, buf:rawptr, count:int) -> int;
+// Linux write (syscall 1): write bytes from a buffer to a file descriptor
+link 1  ~> __linux_write(fd:int, buf:str, count:int) -> int;
+// Linux close (syscall 3): close a file descriptor
+link 3  ~> __linux_close(fd:int) -> int;
+// Linux lseek (syscall 8): reposition the file offset of a descriptor
+link 8  ~> __linux_lseek(fd:int, offset:int, whence:int) -> int;
+// Linux unlink (syscall 87): remove a file by path
+link 87  ~> __linux_unlink(path:str) -> int;
+// Linux unlinkat (syscall 35): remove a file relative to a directory fd (arm64 unlink)
+link 35  ~> __linux_unlinkat(dirfd:int, path:str, flags:int) -> int;
+// Linux mkdir (syscall 83): create a directory
+link 83  ~> __linux_mkdir(path:str, mode:int) -> int;
+// Linux mkdirat (syscall 34): create a directory relative to a directory fd (arm64 mkdir)
+link 34  ~> __linux_mkdirat(dirfd:int, path:str, mode:int) -> int;
+
+// AT_FDCWD (-100): operate relative to the current working directory.
+~> __linux_open_dispatch(path:str, flags:int, mode:int) -> int {
+  match (ARCH) {
+    1 -> { return __linux_openat(-100, path, flags, mode); };
+    _ -> { return __linux_open(path, flags, mode); };
+  }
+}
+~> __linux_unlink_dispatch(path:str) -> int {
+  match (ARCH) {
+    1 -> { return __linux_unlinkat(-100, path, 0); };
+    _ -> { return __linux_unlink(path); };
+  }
+}
+~> __linux_mkdir_dispatch(path:str, mode:int) -> int {
+  match (ARCH) {
+    1 -> { return __linux_mkdirat(-100, path, mode); };
+    _ -> { return __linux_mkdir(path, mode); };
+  }
+}
+
+// ── macOS syscalls (0x2000000-classed) ──
+link 33554437 ~> __macos_open(path:str, flags:int, mode:int) -> int;
+// macOS read (syscall 33554435): read bytes from a file descriptor into a buffer
+link 33554435 ~> __macos_read(fd:int, buf:rawptr, count:int) -> int;
+// macOS write (syscall 33554436): write bytes from a buffer to a file descriptor
+link 33554436 ~> __macos_write(fd:int, buf:str, count:int) -> int;
+// macOS close (syscall 33554438): close a file descriptor
+link 33554438 ~> __macos_close(fd:int) -> int;
+// macOS lseek (syscall 33554631): reposition the file offset of a descriptor
+link 33554631 ~> __macos_lseek(fd:int, offset:int, whence:int) -> int;
+// macOS unlink (syscall 33554442): remove a file by path
+link 33554442 ~> __macos_unlink(path:str) -> int;
+// macOS mkdir (syscall 33554568): create a directory
+link 33554568 ~> __macos_mkdir(path:str, mode:int) -> int;
+
+/**
+ * Opens a file, returning a file descriptor (>= 0) or a negative error.
+ * `flags` uses the host platform's open() flag values; prefer the
+ * convenience helpers read_file/write_file for the common cases.
+ */
+~> open(path:str, flags:int, mode:int) -> int {
+  match (PLATFORM) {
+    0 -> { return __linux_open_dispatch(path, flags, mode); };
+    2 -> { return __macos_open(path, flags, mode); };
+    _ -> { return -1; };
+  }
+}
+
+/** Reads up to `count` bytes into `buf`. Returns bytes read, or negative on error. */
+~> read(fd:int, buf:rawptr, count:int) -> int {
+  match (PLATFORM) {
+    0 -> { return __linux_read(fd, buf, count); };
+    2 -> { return __macos_read(fd, buf, count); };
+    _ -> { return -1; };
+  }
+}
+
+/** Writes `count` bytes from `buf`. Returns bytes written, or negative on error. */
+~> write(fd:int, buf:str, count:int) -> int {
+  match (PLATFORM) {
+    0 -> { return __linux_write(fd, buf, count); };
+    2 -> { return __macos_write(fd, buf, count); };
+    _ -> { return -1; };
+  }
+}
+
+/** Closes a file descriptor. */
+~> close(fd:int) -> int {
+  match (PLATFORM) {
+    0 -> { return __linux_close(fd); };
+    2 -> { return __macos_close(fd); };
+    _ -> { return -1; };
+  }
+}
+
+/** Repositions the file offset. whence: 0=SET, 1=CUR, 2=END. */
+~> seek(fd:int, offset:int, whence:int) -> int {
+  match (PLATFORM) {
+    0 -> { return __linux_lseek(fd, offset, whence); };
+    2 -> { return __macos_lseek(fd, offset, whence); };
+    _ -> { return -1; };
+  }
+}
+
+/** Deletes a file. Returns 0 on success. */
+~> delete(path:str) -> int {
+  match (PLATFORM) {
+    0 -> { return __linux_unlink_dispatch(path); };
+    2 -> { return __macos_unlink(path); };
+    1 -> { return DeleteFileA(path); };
+    _ -> { return -1; };
+  }
+}
+
+/** Creates a directory with the given octal mode. Returns 0 on success. */
+~> mkdir(path:str, mode:int) -> int {
+  match (PLATFORM) {
+    0 -> { return __linux_mkdir_dispatch(path, mode); };
+    2 -> { return __macos_mkdir(path, mode); };
+    1 -> { return CreateDirectoryA(path, null); };
+    _ -> { return -1; };
+  }
+}
+
+/** Returns true if the path can be opened for reading. */
+~> exists(path:str) -> bool {
+  rock fd:int = open(path, 0, 0);
+  match (fd < 0) {
+    true -> { return false; };
+    _ -> {
+      close(fd);
+      return true;
+    };
+  }
+}
+
+/**
+ * Reads an entire file into a null-terminated string. Returns "" on error.
+ */
+~> read_file(path:str) -> str {
+  rock fd:int = open(path, 0, 0);
+  match (fd < 0) {
+    true -> { return ""; };
+    _ -> {};
+  }
+  rock size:int = seek(fd, 0, 2);
+  seek(fd, 0, 0);
+  rock buf:rawptr = memory.alloc(size + 8);
+  read(fd, buf, size);
+  close(fd);
+  rock term:rawptr = buf @ size;
+  *term = 0;
+  return (str)buf;
+}
+
+/**
+ * Writes `content` to `path`, creating/truncating it. Returns bytes written
+ * or negative on error. Uses platform-correct O_WRONLY|O_CREAT|O_TRUNC flags.
+ */
+~> write_file(path:str, content:str) -> int {
+  rock n:int = memory.strlen(content);
+  flow flags:int = 0;
+  match (PLATFORM) {
+    0 -> { flags = 577; };   // linux: O_WRONLY|O_CREAT|O_TRUNC = 1|64|512
+    2 -> { flags = 1537; };  // macos: 1|0x200|0x400 = 1|512|1024
+    _ -> { flags = 0; };
+  }
+  rock fd:int = open(path, flags, 420);  // mode 0644
+  match (fd < 0) {
+    true -> { return -1; };
+    _ -> {};
+  }
+  rock written:int = write(fd, content, n);
+  close(fd);
+  return written;
+}
